@@ -1,0 +1,65 @@
+# Builds the images actually deployed to analytics.solinventum.com and
+# analytics.simplesoftware365.com from the `deploy` branch (upstream master +
+# our not-yet-merged fixes).
+#
+# Servers pin ghcr.io/aduggleby/rybbit-{client,backend}:deploy via their
+# untracked docker-compose.override.yml, so a push here is what ships.
+#
+# Deliberately amd64-only (both servers are x86 Hetzner boxes) and separate from
+# upstream's docker-publish.yml, which triggers on master and also builds arm64.
+name: Deploy Images
+
+on:
+  push:
+    branches: [deploy]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: client
+            dockerfile: ./client/Dockerfile
+          - component: backend
+            dockerfile: ./server/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/rybbit-${{ matrix.component }}
+          # `deploy` is the moving tag the servers follow; the sha tag gives a
+          # pinnable target to roll back to.
+          tags: |
+            type=raw,value=deploy
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
