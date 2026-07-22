@@ -13,6 +13,9 @@ on:
   push:
     branches: [deploy]
   workflow_dispatch:
+  # Invoked by rebase-deploy.yml after it moves the branch — a GITHUB_TOKEN push
+  # does not fire the push trigger above.
+  workflow_call:
 
 jobs:
   build:

@@ -1,0 +1,139 @@
+# Keeps the `deploy` branch current with upstream.
+#
+# Without this, pinning the servers to our fork images freezes their app code:
+# the nightly update.sh still pulls upstream's repo for compose/Caddy, but the
+# images only change when someone pushes to `deploy`. That would be silent in
+# exactly the way the original updater failure was.
+#
+# Runs before the servers' own update jobs (solinventum nightly 03:30,
+# simplesoftware365 Sundays 12:00), so a fresh image is waiting for them.
+#
+# NOTE: `on: schedule` only fires from the repository's DEFAULT branch, which is
+# why `deploy` is the fork's default — not `master`.
+name: Rebase deploy onto upstream
+
+on:
+  schedule:
+    - cron: "0 2 * * 1" # Mondays 02:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  rebase:
+    name: Rebase onto upstream/master
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.rebase.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: deploy
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/rybbit-io/rybbit.git
+          git fetch upstream master
+
+      - name: Rebase
+        id: rebase
+        run: |
+          set -euo pipefail
+
+          before=$(git rev-parse HEAD)
+
+          # Nothing to do if we already contain every upstream commit.
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "Already up to date with upstream/master."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Behind upstream by $(git rev-list --count HEAD..upstream/master) commit(s)."
+
+          if ! git rebase upstream/master; then
+            git rebase --abort || true
+            echo "Rebase hit conflicts; leaving deploy untouched."
+            exit 1
+          fi
+
+          after=$(git rev-parse HEAD)
+          if [ "$before" = "$after" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Report which of our commits are still unmerged upstream, so the stack
+          # shrinking is visible in the run log.
+          echo "Remaining local commits on top of upstream:"
+          git log --oneline upstream/master..HEAD
+
+          git push --force-with-lease origin deploy
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open an issue if the rebase conflicted
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = "Rebase of `deploy` onto upstream/master failed";
+            const body = [
+              "The scheduled rebase hit conflicts, so `deploy` was left unchanged and **no new image was built**.",
+              "",
+              "The servers keep running the previous image, so nothing is broken — but they will not pick up",
+              "upstream changes until this is resolved.",
+              "",
+              "Resolve locally:",
+              "```bash",
+              "cd ~/Source/rybbit",
+              "git fetch upstream master && git checkout deploy",
+              "git rebase upstream/master   # fix conflicts, or drop commits upstream has merged",
+              "git push --force-with-lease origin deploy",
+              "```",
+              "",
+              `Failed run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            ].join("\n");
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: "rebase-failure",
+            });
+
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.data[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ["rebase-failure"],
+              });
+            }
+
+  # Rebuild only when the rebase actually moved the branch. A GITHUB_TOKEN push
+  # deliberately does not trigger other workflows, so the build is invoked here
+  # rather than relying on the push trigger in deploy-images.yml.
+  build:
+    name: Build images
+    needs: rebase
+    if: needs.rebase.outputs.changed == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/deploy-images.yml
