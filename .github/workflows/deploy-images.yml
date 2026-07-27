@@ -9,13 +9,12 @@
 # upstream's docker-publish.yml, which triggers on master and also builds arm64.
 name: Deploy Images
 
+# The push trigger also covers rebase-deploy.yml: it pushes with a deploy key,
+# which (unlike GITHUB_TOKEN) fires push-triggered workflows.
 on:
   push:
     branches: [deploy]
   workflow_dispatch:
-  # Invoked by rebase-deploy.yml after it moves the branch — a GITHUB_TOKEN push
-  # does not fire the push trigger above.
-  workflow_call:
 
 jobs:
   build:
